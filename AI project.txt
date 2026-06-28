@@ -1,0 +1,182 @@
+Aapke [RAG_Learning.ipynb](https://colab.sandbox.google.com/drive/1ytDL6DIRmoI4GeIp6_beW4Mx98DjZPfh#scrollTo=_jE7065sa1P0) notebook ka naya aur sahi code bilkul taiyar hai. Chaliye is pure code ko ek baar fir se **line-by-line aur uske asli logic** ke saath samajhte hain taaki aapko poora workflow clear ho jaye.
+
+---
+
+## 1. Libraries Install Karna
+
+```python
+!pip install -q langchain langchain-community faiss-cpu sentence-transformers pypdf langchain-text-splitters langchain-huggingface langchain-google-genai gradio
+
+```
+
+* **Explanation:** Yeh line un saari packages ko download karti hai jo RAG pipeline chalane ke liye zaroori hain. `langchain` pure project ka structure sambhalti hai, `faiss-cpu` vector database banta hai, `gradio` se front-end UI banta hai, aur `pypdf` hamari PDF files ko extract karne ka kaam karti hai.
+
+---
+
+## 2. PDF Upload aur Sahi Document Extraction
+
+```python
+from google.colab import files
+from pypdf import PdfReader
+from langchain_core.documents import Document
+
+# 1. File upload karein
+uploaded = files.upload()
+filename = list(uploaded.keys())[0]
+
+```
+
+* **`files.upload()`:** Yeh aapke computer se file select karne ke liye pop-up window kholta hai.
+* **`filename = list(...)`:** Upload ki gayi file ka jo bhi naam hai (jaise `100 DSA QUESTIONS.pdf`), use nikal kar ek variable mein save kar leta hai.
+
+```python
+# 2. PDF Reader initialize karein
+reader = PdfReader(filename)
+
+# 3. Har page ka text uske page number metadata ke saath save karein
+docs_list = []
+for i, page in enumerate(reader.pages):
+    text = page.extract_text()
+    if text:
+        docs_list.append(Document(page_content=text, metadata={"page": i}))
+
+print(f"Total pages loaded: {len(docs_list)}")
+
+```
+
+* **`enumerate(reader.pages)`:** Yeh loop PDF ke saare pages par ek-ek karke jata hai aur saath mein unka index (`i`) yani page number bhi track karta hai.
+* **`Document(page_content=text, metadata={"page": i})`:** **Yeh sabse zaroori badlav hai.** Pichle code mein humne saare text ko ek lambi string bana diya tha jisse page numbers kho gaye the. Ab hum har page ke text ko alag rakh rahe hain aur uske `metadata` ke andar uska sahi page number (`i`) hamesha ke liye daal rahe hain.
+
+---
+
+## 3. Text Splitting / Chunking
+
+```python
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,   # Chunk size ko badhakar 1000 kiya
+    chunk_overlap=200
+)
+
+final_chunks = text_splitter.split_documents(docs_list)
+print(f"Total chunks created: {len(final_chunks)}") 
+
+```
+
+* **`chunk_size=1000`:** Humne character limit 500 se badhakar 1000 kar di hai. DSA ke bade topics (jaise Array ya Linked List) lambe hote hain. Agar chunks chhote honge, toh aadha concept ek chunk mein aur aadha dusre mein chala jayega, jisse Gemini confuse ho raha tha.
+* **`split_documents(docs_list)`:** Yeh function `docs_list` ko uthata hai, use 1000 characters ke tukdon mein todta hai, aur sabse acchi baat—**har tukde ke upar uske asli page ka metadata chipka kar rakhta hai.**
+
+---
+
+## 4. Embeddings aur FAISS Vector DB
+
+```python
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+db = FAISS.from_documents(
+    final_chunks,
+    embeddings
+)
+print("Vector Database Created Successfully!")
+
+```
+
+* **`HuggingFaceEmbeddings(...)`:** Yeh open-source model hamare english text chunks ko mathematical vectors (numbers) mein convert karta hai.
+* **`FAISS.from_documents(...)`:** Yeh hamare saare chunks aur unke andar ke page number waale metadata ko is naye database mein save kar deta hai. Ab jab hum koi sawaal poochenge, toh yeh database milte-julte vectors ko turant dhoodh nikalega.
+
+---
+
+## 5. Gemini LLM Setup
+
+```python
+import os
+os.environ["GOOGLE_API_KEY"] = "YOUR_API_KEY_HERE"
+
+from langchain_google_genai import ChatGoogleGenerativeAI
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    temperature=0
+)
+
+```
+
+* **`os.environ`:** Humne apni Google API key save ki taaki Google ke servers hamare code ko access karne dein.
+* **`temperature=0`:** Iska matlab hai ki hum Gemini ko bilkul "serious" aur factual rakhna chahte hain. Agar use PDF mein answer nahi mila, toh woh apni taraf se jhoot ya kahani nahi banayega (No Hallucination).
+
+---
+
+## 6. Chat Function aur Gradio UI (The Brain of RAG)
+
+```python
+import gradio as gr
+
+def chat_with_pdf(question):
+    # 1. Database se top 3 relevant chunks nikalein
+    results = db.similarity_search(question, k=3)
+    
+    # 2. Context taiyar karein
+    context = "\n\n".join([doc.page_content for doc in results])
+
+```
+
+* **`db.similarity_search(question, k=3)`:** Jaise hi aapne Gradio mein likha *"what is Array"*, is line ne database mein jaakar usse sabse zyada match hone waale 3 sabse sahi text ke tukde nikaal liye.
+* **`context = ...`:** Un teenon tukdon ko jodkar ek bada para (Context) bana diya gaya.
+
+```python
+    # 3. Prompt banayein
+    prompt = f"""
+    Answer only from the context.
+    Context:
+    {context}
+    Question:
+    {question}
+    If the answer is not found, say:
+    I couldn't find the answer in the uploaded PDF.
+    """
+    
+    # 4. LLM se jawab lein
+    response = llm.invoke(prompt)
+
+```
+
+* **`prompt`:** Hum Gemini ko bandh rahe hain ki *"Bhai, apna dimaag mat chalao, jo is Context ke andar likha hai, sirf wahi se dekh kar answer do."*
+* **`llm.invoke(prompt)`:** Gemini is prompt ko padhta hai aur context ke andar se sahi answer generate karke `response.content` mein save karta hai.
+
+```python
+    # 5. Sahi Page Numbers nikalne ka logic
+    sources = set() 
+    for doc in results:
+        page = doc.metadata.get("page")
+        if isinstance(page, int):
+            sources.add(f"Page {page + 1}")
+        else:
+            sources.add("Page Unknown")
+            
+    return response.content + "\n\nSources:\n" + "\n".join(sorted(sources))
+
+```
+
+* **`sources = set()`:** Humne `set()` ka use isliye kiya kyunki agar 2 chunks ek hi page (jaise Page 4) se aa gaye, toh yeh use do baar print nahi karega, sirf ek hi baar `Page 4` likhega.
+* **`page + 1`:** Python mein counting `0` se shuru hoti hai, isliye humne plus 1 kiya taaki agar data page 0 par ho, toh user ko woh `Page 1` dikhayi de.
+
+```python
+# Gradio Interface Setup
+demo = gr.Interface(
+    fn=chat_with_pdf,
+    inputs=gr.Textbox(label="Ask Question"),
+    outputs=gr.Textbox(label="Answer"),
+    title="AI PDF Chatbot",
+    description="Ask questions from your uploaded PDF"
+)
+
+demo.launch(debug=True)
+
+```
+
+* **`gr.Interface(...)`:** Yeh aapke browser mein ek suthra web app interface khol deta hai jismein ek input box aur ek output box hota hai. Aap jo bhi input box mein type karenge, yeh use `chat_with_pdf` function mein bhej dega aur wahan se aaya hua return response aapko screen par display kar dega.
